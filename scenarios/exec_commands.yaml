@@ -1,0 +1,25 @@
+# 调试「agent 执行命令」的工具调用循环：
+# 第 1 轮下发 echo -> agent 执行并回传结果
+# 第 2 轮下发 pwd  -> agent 执行并回传结果
+# 第 3 轮结合工具结果输出总结文本，循环结束
+name: exec-commands
+description: 预排两轮命令执行（echo / pwd）后收尾，验证 agent 工具调用回路
+requires_tools: [run_command]
+
+steps:
+  - tool_calls:
+      - name: run_command
+        arguments: { command: "echo hello-from-mock" }
+
+  - tool_calls:
+      - name: run_command
+        arguments: { command: "pwd" }
+
+  - content: |
+      命令执行完毕，最后一条命令输出：
+      {last_tool_result}
+      全部预排命令已成功执行，任务结束。
+
+# 预写步骤耗尽后（agent 继续追加 tool 结果消息）的兜底回复
+default:
+  content: 所有预排命令均已执行完毕，无更多操作。

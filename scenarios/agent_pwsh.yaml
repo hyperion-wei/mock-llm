@@ -1,0 +1,27 @@
+# 对接 coding agent（工具清单含 pwsh/edit/write/read 等）的执行命令剧本。
+#
+# 使用前先核对工具参数名：
+#   GET http://127.0.0.1:8789/__inspect/tools
+# 找到 pwsh 工具的 parameters.properties，把下面 arguments 的键名改成与之一致。
+# 参数写错不会静默失败 —— mock 日志会打 WARN，agent 侧也会报 schema 校验错误。
+name: agent-pwsh-demo
+description: 对接 coding agent：两轮 PowerShell 命令后收尾
+requires_tools: [pwsh]
+
+steps:
+  - tool_calls:
+      - name: pwsh
+        arguments: { command: "Get-Date" }
+
+  - tool_calls:
+      - name: pwsh
+        arguments: { command: "Get-ChildItem | Select-Object -First 5" }
+
+  - content: |
+      两轮命令已执行完毕，最后一条命令输出：
+      {last_tool_result}
+      调试流程结束。
+
+# 预排步骤耗尽后的兜底回复
+default:
+  content: 预排命令均已执行完毕，无更多步骤。
