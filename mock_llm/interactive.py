@@ -34,7 +34,8 @@ HELP_TEXT = """[mock-llm] 交互模式可用指令：
 - /tools                      查看工具清单
 - /tool <工具名>              查看工具参数 schema 与调用示例
 - <工具名> <JSON参数>         下发 tool_calls，由客户端真实执行并回传结果
-- /exec <工具名> <JSON参数>   mock 本地执行参数中的命令字段并直接返回结果
+- /call <工具名> <JSON参数>   跳过必填校验强制下发
+- /exec <工具名> <JSON参数>   服务端本地执行（默认禁用，服务端设 MOCK_EXEC_ENABLED=1 开启）
 - /help                       显示本说明"""
 
 
@@ -116,7 +117,7 @@ def format_tool_detail(name: str, tool_defs: dict[str, dict]) -> str:
 
 
 def local_exec(name: str, args: dict) -> str:
-    """在 mock 所在机器上执行参数中的命令字段（仅限 /exec 显式触发）。"""
+    """在 mock 所在机器上执行参数中的命令字段。仅当 MOCK_EXEC_ENABLED=1 时可达。"""
     command = next(
         (args[k] for k in COMMAND_PARAM_KEYS if isinstance(args.get(k), str)), None
     )
@@ -209,23 +210,41 @@ def route_interactive(messages: list[dict], tool_defs: dict[str, dict]) -> dict 
             "content": format_tool_detail(m.group(1), tool_defs),
         }
 
-    # /exec 本地执行命令字段；/call 跳过必填校验强制下发
-    for prefix, label in (("/exec ", "exec"), ("/call ", "call_forced")):
-        if first_line.startswith(prefix):
-            parts = first_line.split(maxsplit=2)
-            if len(parts) < 3:
-                return {
-                    "kind": "text",
-                    "label": f"{label}_error",
-                    "content": f"[mock-llm] 用法: {prefix.strip()} <工具名> <JSON参数>，例如 /exec pwsh {{\"command\": \"Get-Date\"}}",
-                }
-            name, raw = parts[1], parts[2]
-            args, err = _extract_json_obj(raw)
-            if err or args is None:
-                return {"kind": "text", "label": f"{label}_error", "content": f"[mock-llm] 工具 `{name}` {err}"}
-            if label == "exec":
-                return {"kind": "text", "label": "exec", "content": local_exec(name, args)}
-            return _make_call_response(name, args, tool_defs, messages, force=True)
+    # /exec 服务端本地执行命令字段 —— 默认禁用（公网部署防 RCE），设 MOCK_EXEC_ENABLED=1 才开启
+    if first_line.startswith("/exec "):
+        if os.environ.get("MOCK_EXEC_ENABLED") != "1":
+            return {
+                "kind": "text",
+                "label": "exec_disabled",
+                "content": "[mock-llm] /exec 已禁用：服务端本地执行属高危能力，公网部署默认关闭。如需开启，在服务端设置环境变量 MOCK_EXEC_ENABLED=1 并重启；当前可改用 `<工具名> {JSON}` 交由客户端执行。",
+            }
+        parts = first_line.split(maxsplit=2)
+        if len(parts) < 3:
+            return {
+                "kind": "text",
+                "label": "exec_error",
+                "content": '[mock-llm] 用法: /exec <工具名> <JSON参数>，例如 /exec pwsh {"command": "Get-Date"}',
+            }
+        name, raw = parts[1], parts[2]
+        args, err = _extract_json_obj(raw)
+        if err or args is None:
+            return {"kind": "text", "label": "exec_error", "content": f"[mock-llm] 工具 `{name}` {err}"}
+        return {"kind": "text", "label": "exec", "content": local_exec(name, args)}
+
+    # /call 前缀：跳过必填校验强制下发
+    if first_line.startswith("/call "):
+        parts = first_line.split(maxsplit=2)
+        if len(parts) < 3:
+            return {
+                "kind": "text",
+                "label": "call_forced_error",
+                "content": '[mock-llm] 用法: /call <工具名> <JSON参数>，例如 /call pwsh {"command": "Get-Date"}',
+            }
+        name, raw = parts[1], parts[2]
+        args, err = _extract_json_obj(raw)
+        if err or args is None:
+            return {"kind": "text", "label": "call_error", "content": f"[mock-llm] 工具 `{name}` {err}"}
+        return _make_call_response(name, args, tool_defs, messages, force=True)
 
     # 首行恰好是一个工具名 -> 查看参数
     if first_line in tool_defs:

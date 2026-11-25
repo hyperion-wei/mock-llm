@@ -47,7 +47,7 @@ Python 3.10+ / FastAPI 实现，支持流式 SSE、并行工具调用、参数 s
 | `pwsh`（首行为工具名）或 `/tool pwsh` | 该工具的**参数 schema + 必填参数调用示例 + 可选参数** |
 | `pwsh {"description": "...", "command": "..."}` | 缺必填参数时**拦截并给出完整示例**；校验通过则下发标准 `tool_calls`，客户端真实执行，结果回传后 mock 返回**结果确认** |
 | `/call pwsh {...}` | 跳过必填校验**强制下发**（故意复现客户端报错时用） |
-| `/exec pwsh {"command": "..."}` | mock **本地直接执行**参数中的命令字段并返回 stdout/stderr |
+| `/exec pwsh {"command": "..."}` | **默认禁用**（公网部署防 RCE）。服务端设 `MOCK_EXEC_ENABLED=1` 后开放：mock 本地执行命令字段并返回 stdout/stderr |
 | `/help` | 指令说明 |
 
 要点：
@@ -56,6 +56,7 @@ Python 3.10+ / FastAPI 实现，支持流式 SSE、并行工具调用、参数 s
 - **参数校验**：下发的参数与工具声明的 JSON Schema 必填项不符时，直接在聊天里拦截（而不是等客户端报错），并给出可直接复制的完整调用示例。
 - **防重复下发**：工具执行回传后，同一条指令再被发送时不会重复下发 tool_call，而是返回结果确认文本。
 - **LLM Key 记录**：自动记录每个请求携带的 API Key（`Authorization: Bearer` / `x-api-key` / `api-key` / `x-goog-api-key`），可验证 agent 实际发送的 key 是否正确；鉴权失败（401）时也能看到对方用的 key。
+- **/exec 默认关闭**：服务端本地执行属高危能力（等效 RCE），需显式设置 `MOCK_EXEC_ENABLED=1` 才开放；公网部署无需任何操作即处于关闭状态。
 - **诊断端点**：路由未命中时打开 `GET /__inspect/last_request` 查看 mock 实际收到的 messages 原文。
 
 ## 快速开始

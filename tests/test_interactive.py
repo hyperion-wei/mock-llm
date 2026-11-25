@@ -193,15 +193,25 @@ def test_call_truncated_json_reports_error(client: TestClient):
     assert "JSON 解析失败" in content
 
 
-def test_exec_runs_locally(client: TestClient):
-    """/exec -> mock 本地执行命令字段并返回结果。"""
+def test_exec_disabled_by_default(client: TestClient):
+    """默认禁用 /exec（公网防 RCE）：返回禁用提示，不执行任何命令。"""
+    content = chat_text(client, [{"role": "user", "content": '/exec pwsh {"command": "echo should-not-run"}'}])
+    assert "/exec 已禁用" in content
+    assert "MOCK_EXEC_ENABLED=1" in content
+    assert "should-not-run" not in content
+
+
+def test_exec_runs_locally(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    """显式开启后 /exec -> mock 本地执行命令字段并返回结果。"""
+    monkeypatch.setenv("MOCK_EXEC_ENABLED", "1")
     content = chat_text(client, [{"role": "user", "content": '/exec pwsh {"command": "echo hi-from-mock"}'}])
     assert "[mock-exec]" in content
     assert "exit=0" in content
     assert "hi-from-mock" in content
 
 
-def test_exec_no_command_key(client: TestClient):
+def test_exec_no_command_key(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("MOCK_EXEC_ENABLED", "1")
     content = chat_text(client, [{"role": "user", "content": '/exec write {"path": "a.txt"}'}])
     assert "没有命令字段" in content
 
