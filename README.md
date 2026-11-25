@@ -55,6 +55,7 @@ Python 3.10+ / FastAPI 实现，支持流式 SSE、并行工具调用、参数 s
 - **首行路由**：只解析消息首行，兼容 IDE 客户端在消息尾部追加注入内容；JSON 用增量解析提取第一个完整对象。
 - **参数校验**：下发的参数与工具声明的 JSON Schema 必填项不符时，直接在聊天里拦截（而不是等客户端报错），并给出可直接复制的完整调用示例。
 - **防重复下发**：工具执行回传后，同一条指令再被发送时不会重复下发 tool_call，而是返回结果确认文本。
+- **LLM Key 记录**：自动记录每个请求携带的 API Key（`Authorization: Bearer` / `x-api-key` / `api-key` / `x-goog-api-key`），可验证 agent 实际发送的 key 是否正确；鉴权失败（401）时也能看到对方用的 key。
 - **诊断端点**：路由未命中时打开 `GET /__inspect/last_request` 查看 mock 实际收到的 messages 原文。
 
 ## 快速开始
@@ -123,13 +124,18 @@ default:                             # 步骤耗尽后的兜底
 | `GET /__inspect/requests` | 最近 200 条请求的处理摘要（工具清单/轮次/命中步骤） |
 | `GET /__inspect/tools` | 最近一次请求中 agent 声明的工具定义原文 |
 | `GET /__inspect/last_request` | 最近一次请求的 messages 原文（诊断路由问题） |
+| `GET /__inspect/keys` | 请求中出现过的 LLM API Key（按值去重，含来源/次数/时间） |
+| `POST /__inspect/keys/clear` | 清空 Key 记录 |
 | `POST /__inspect/reload` | 热重载场景目录 |
 
 服务端每轮请求都会打印一行处理日志：
 
 ```
 [mock-llm] req#2 interactive[call] -> tool_calls[pwsh]
+[mock-llm] 记录新 LLM Key (Authorization: Bearer): sk-your-agent-key
 ```
+
+> 安全提醒：`/__inspect/keys` 以**明文**记录 Key 值，仅限本机调试使用，不要把 mock 服务暴露到不受信任的网络。
 
 ## 项目结构
 

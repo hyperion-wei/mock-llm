@@ -64,9 +64,20 @@ class AppState:
         self.request_seq = 0
         self.last_tool_defs: dict[str, dict] = {}  # 最近一次请求看到的工具定义（写场景用）
         self.last_messages: list[dict] = []  # 最近一次请求的 messages（诊断路由问题用）
+        self.keys_seen: dict[str, dict] = {}  # 请求中出现过的 LLM API Key（按值去重）
 
     def reload(self) -> None:
         self.scenarios = load_scenario_dir(self.scenario_dir)
+
+    def record_key(self, source: str, value: str) -> None:
+        """记录一个 LLM API Key：按值去重，累计次数与来源。"""
+        entry = self.keys_seen.setdefault(
+            value, {"sources": [], "first_seen": _now_iso(), "last_seen": _now_iso(), "count": 0}
+        )
+        if source not in entry["sources"]:
+            entry["sources"].append(source)
+        entry["count"] += 1
+        entry["last_seen"] = _now_iso()
 
 
 def _now_iso() -> str:
@@ -133,6 +144,25 @@ def _warn_argument_mismatch(step: Step, tool_defs: dict[str, dict]) -> None:
             _log(f"WARN 工具 {call.name} 参数与声明不符: {'; '.join(parts)}（GET /__inspect/tools 可查真实 schema）")
 
 
+def _extract_llm_key(request: Request) -> tuple[str, str] | None:
+    """从常见请求头提取 LLM API Key（Bearer / x-api-key / api-key / x-goog-api-key）。"""
+    auth = request.headers.get("authorization", "")
+    if auth.strip():
+        if auth.lower().startswith("bearer "):
+            return ("Authorization: Bearer", auth[7:].strip())
+        return ("Authorization", auth.strip())
+    for header in ("x-api-key", "api-key", "x-goog-api-key"):
+        value = request.headers.get(header, "").strip()
+        if value:
+            return (header, value)
+    return None
+
+
+def _llm_key(key_info: tuple[str, str] | None) -> str | None:
+    """从 (来源, key) 元组取 key 值，供请求摘要记录。"""
+    return key_info[1] if key_info else None
+
+
 def _validate_api_key(request: Request) -> bool:
     """校验 Authorization: Bearer <key>。未设置 MOCK_LLM_KEY 环境变量时跳过校验。"""
     expected = os.environ.get("MOCK_LLM_KEY")
@@ -182,6 +212,7 @@ def _record(
     step_index: int | str,
     finish_reason: str,
     action: str,
+    llm_key: str | None = None,
 ) -> None:
     state.request_log.append(
         {
@@ -196,6 +227,7 @@ def _record(
             "step": step_index,
             "finish_reason": finish_reason,
             "action": action,
+            "llm_key": llm_key,
         }
     )
 
@@ -219,6 +251,13 @@ def _create_app(state: AppState) -> FastAPI:
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
+        # 记录请求中的 LLM Key（放在鉴权前，401 时也能看到对方用的 key）
+        key_info = _extract_llm_key(request)
+        if key_info is not None:
+            source, key_value = key_info
+            state.record_key(source, key_value)
+            if state.keys_seen[key_value]["count"] == 1:
+                _log(f"记录新 LLM Key ({source}): {key_value}")
         if not _validate_api_key(request):
             return JSONResponse(
                 status_code=401,
@@ -249,7 +288,7 @@ def _create_app(state: AppState) -> FastAPI:
             if scenario is None:
                 _log(f"req#{state.request_seq} tools={requested_tools} -> 无匹配场景，返回提示文本")
                 text = f"[mock-llm] 没有场景匹配工具清单 {requested_tools}，请在 scenarios/ 目录添加场景或调整 requires_tools。"
-                _record(state, request_id, body, None, "-", "stop", text)
+                _record(state, request_id, body, None, "-", "stop", text, llm_key=_llm_key(key_info))
                 return _text_response(request_id, created, model, text, stream)
         else:
             # 交互模式（默认）：按消息格式手动驱动，见 mock_llm/interactive.py
@@ -259,27 +298,27 @@ def _create_app(state: AppState) -> FastAPI:
                 if interactive["kind"] == "text":
                     content = interactive["content"]
                     _log(f"req#{state.request_seq} interactive[{label}] -> 文本 {len(content)} 字符")
-                    _record(state, request_id, body, None, f"interactive:{label}", "stop", f"text[{label}]")
+                    _record(state, request_id, body, None, f"interactive:{label}", "stop", f"text[{label}]", llm_key=_llm_key(key_info))
                     return _text_response(request_id, created, model, content, stream)
                 step = Step(tool_calls=interactive["calls"])
                 _warn_argument_mismatch(step, tool_defs)
                 finish_reason, tool_calls, action = _build_step_response(
                     state, body, None, step, f"interactive:{label}"
                 )
-                _record(state, request_id, body, None, f"interactive:{label}", finish_reason, action)
+                _record(state, request_id, body, None, f"interactive:{label}", finish_reason, action, llm_key=_llm_key(key_info))
                 if stream:
                     return _stream_response(request_id, created, model, finish_reason, tool_calls, step, messages)
                 return _json_response(request_id, created, model, finish_reason, tool_calls, step, messages)
 
             _log(f"req#{state.request_seq} interactive[tools_list] -> 默认返回工具清单")
-            _record(state, request_id, body, None, "interactive:tools_list", "stop", "text[tools_list]")
+            _record(state, request_id, body, None, "interactive:tools_list", "stop", "text[tools_list]", llm_key=_llm_key(key_info))
             return _text_response(request_id, created, model, format_tool_list(tool_defs), stream)
 
         step_index: int | str = rounds if rounds < len(scenario.steps) else "default"
         step = scenario.pick_step(rounds)
         _warn_argument_mismatch(step, tool_defs)
         finish_reason, tool_calls, action = _build_step_response(state, body, scenario, step, step_index)
-        _record(state, request_id, body, scenario, step_index, finish_reason, action)
+        _record(state, request_id, body, scenario, step_index, finish_reason, action, llm_key=_llm_key(key_info))
 
         if stream:
             return _stream_response(request_id, created, model, finish_reason, tool_calls, step, messages)
@@ -317,6 +356,21 @@ def _create_app(state: AppState) -> FastAPI:
                 content = content[:800] + f"...(共 {len(m['content'])} 字符)"
             trimmed.append({k: content if k == "content" else v for k, v in m.items()})
         return {"count": len(state.last_messages), "messages": trimmed}
+
+    @app.get("/__inspect/keys")
+    def inspect_keys() -> dict:
+        """请求中出现过的 LLM API Key（明文记录，仅限本地调试使用）。"""
+        keys = [
+            {"key": value, **info}
+            for value, info in sorted(state.keys_seen.items(), key=lambda kv: kv[1]["last_seen"], reverse=True)
+        ]
+        return {"total_unique": len(keys), "keys": keys}
+
+    @app.post("/__inspect/keys/clear")
+    def inspect_keys_clear() -> dict:
+        state.keys_seen.clear()
+        _log("LLM Key 记录已清空")
+        return {"ok": True}
 
     @app.post("/__inspect/reload")
     def inspect_reload() -> dict:
