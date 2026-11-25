@@ -25,7 +25,7 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 try:
@@ -163,6 +163,17 @@ def _llm_key(key_info: tuple[str, str] | None) -> str | None:
     return key_info[1] if key_info else None
 
 
+def _require_inspect_auth(authorization: str = Header(default="")) -> None:
+    """/__inspect/* 端点鉴权：设置 MOCK_LLM_KEY 时要求 Bearer 匹配。
+
+    公网部署保护：inspect 端点含 LLM Key 明文记录，必须与 /v1/* 同等受保护。
+    未设置 MOCK_LLM_KEY（纯本机使用）时保持开放。
+    """
+    expected = os.environ.get("MOCK_LLM_KEY")
+    if expected and authorization != f"Bearer {expected}":
+        raise HTTPException(status_code=401, detail="invalid api key for inspect endpoints")
+
+
 def _validate_api_key(request: Request) -> bool:
     """校验 Authorization: Bearer <key>。未设置 MOCK_LLM_KEY 环境变量时跳过校验。"""
     expected = os.environ.get("MOCK_LLM_KEY")
@@ -235,6 +246,7 @@ def _record(
 def _create_app(state: AppState) -> FastAPI:
     app = FastAPI(title="mock-llm", version="0.1.0")
     app.state.mock = state
+    inspect = APIRouter(dependencies=[Depends(_require_inspect_auth)])
 
     # ---------- /v1/models ----------
 
@@ -326,7 +338,7 @@ def _create_app(state: AppState) -> FastAPI:
 
     # ---------- 调试端点 ----------
 
-    @app.get("/__inspect/scenarios")
+    @inspect.get("/__inspect/scenarios")
     def inspect_scenarios() -> dict:
         return {
             "model": state.model_name,
@@ -334,16 +346,16 @@ def _create_app(state: AppState) -> FastAPI:
             "scenarios": [s.describe() for s in state.scenarios],
         }
 
-    @app.get("/__inspect/requests")
+    @inspect.get("/__inspect/requests")
     def inspect_requests() -> dict:
         return {"total": state.request_seq, "recent": list(state.request_log)}
 
-    @app.get("/__inspect/tools")
+    @inspect.get("/__inspect/tools")
     def inspect_tools() -> dict:
         """最近一次请求中 agent 声明的工具定义。写场景的 arguments 前先看这里核对参数名。"""
         return {"count": len(state.last_tool_defs), "tools": state.last_tool_defs}
 
-    @app.get("/__inspect/last_request")
+    @inspect.get("/__inspect/last_request")
     def inspect_last_request() -> dict:
         """最近一次请求的 messages 原文（每条内容截断 800 字符），诊断交互路由未命中时用。"""
         trimmed = []
@@ -357,7 +369,7 @@ def _create_app(state: AppState) -> FastAPI:
             trimmed.append({k: content if k == "content" else v for k, v in m.items()})
         return {"count": len(state.last_messages), "messages": trimmed}
 
-    @app.get("/__inspect/keys")
+    @inspect.get("/__inspect/keys")
     def inspect_keys() -> dict:
         """请求中出现过的 LLM API Key（明文记录，仅限本地调试使用）。"""
         keys = [
@@ -366,13 +378,13 @@ def _create_app(state: AppState) -> FastAPI:
         ]
         return {"total_unique": len(keys), "keys": keys}
 
-    @app.post("/__inspect/keys/clear")
+    @inspect.post("/__inspect/keys/clear")
     def inspect_keys_clear() -> dict:
         state.keys_seen.clear()
         _log("LLM Key 记录已清空")
         return {"ok": True}
 
-    @app.post("/__inspect/reload")
+    @inspect.post("/__inspect/reload")
     def inspect_reload() -> dict:
         try:
             state.reload()
@@ -386,6 +398,7 @@ def _create_app(state: AppState) -> FastAPI:
     def root() -> Response:
         return Response(status_code=200)
 
+    app.include_router(inspect)
     return app
 
 

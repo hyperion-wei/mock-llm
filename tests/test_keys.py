@@ -96,5 +96,21 @@ def test_key_recorded_even_when_auth_fails(client: TestClient, monkeypatch: pyte
     monkeypatch.setenv("MOCK_LLM_KEY", "sk-expected")
     resp = _chat(client, {"Authorization": "Bearer sk-wrong-key"})
     assert resp.status_code == 401
-    entry = client.get("/__inspect/keys").json()["keys"][0]
-    assert entry["key"] == "sk-wrong-key"
+    data = client.get("/__inspect/keys", headers={"Authorization": "Bearer sk-expected"}).json()
+    assert data["keys"][0]["key"] == "sk-wrong-key"
+
+
+def test_inspect_protected_when_key_set(client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    """公网部署保护：设置 MOCK_LLM_KEY 后 /__inspect/* 需要 Bearer 鉴权。"""
+    monkeypatch.setenv("MOCK_LLM_KEY", "sk-guard")
+    assert client.get("/__inspect/keys").status_code == 401
+    assert client.get("/__inspect/requests").status_code == 401
+    assert client.get("/__inspect/scenarios").status_code == 401
+    assert client.post("/__inspect/reload").status_code == 401
+    ok = client.get("/__inspect/keys", headers={"Authorization": "Bearer sk-guard"})
+    assert ok.status_code == 200
+
+
+def test_inspect_open_without_key(client: TestClient):
+    """纯本机使用（未设 MOCK_LLM_KEY）时 inspect 端点保持开放。"""
+    assert client.get("/__inspect/keys").status_code == 200
